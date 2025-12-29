@@ -1,0 +1,89 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            bzo3piexi4np9gb9z09ngf2kb2mrt1bx:
+                args:
+                    - --train_steps
+                    - "10"
+                    - --batch_size
+                    - "2"
+                    - --wandb_key
+                    - bb9e5fb79e0cc7d03b703e203e31bd17aedb0bdc
+                cpu_count: 20
+                cpu_count_logical: 20
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "4031871553536"
+                        used: "1203104800768"
+                email: danielwilson@xriglobal.ai
+                executable: /usr/bin/python3
+                git:
+                    remote: https://github.com/TMElyralab/MuseTalk.git
+                gpu: NVIDIA GB10
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 6144
+                      name: NVIDIA GB10
+                      uuid: GPU-e8e0d9cc-b40e-1a80-27fd-129ebb681806
+                host: d02a7b90338a
+                memory:
+                    total: "128524255232"
+                os: Linux-6.14.0-1013-nvidia-aarch64-with-glibc2.39
+                program: /app/ai_service/MuseTalk/../distill/train_distill.py
+                python: CPython 3.12.3
+                root: /app/ai_service/MuseTalk
+                startedAt: "2025-12-27T22:41:15.960900Z"
+                writerId: bzo3piexi4np9gb9z09ngf2kb2mrt1bx
+        m: []
+        python_version: 3.12.3
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 71
+                - 83
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 71
+                - 83
+            "3":
+                - 16
+            "4": 3.12.3
+            "5": 0.23.1
+            "6": 4.57.3
+            "12": 0.23.1
+            "13": linux-aarch64
+batch_size:
+    value: 2
+data_root:
+    value: ./dataset/HDTF
+learning_rate:
+    value: 0.0001
+output_dir:
+    value: ./distill_output
+project_name:
+    value: musetalk-distillation
+resolution:
+    value: 256
+save_steps:
+    value: 200
+student_model:
+    value: nota-ai/bk-sdm-tiny
+teacher_model:
+    value: ./models/musetalk
+train_steps:
+    value: 10
+wandb_key:
+    value: bb9e5fb79e0cc7d03b703e203e31bd17aedb0bdc

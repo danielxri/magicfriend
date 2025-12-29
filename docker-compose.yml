@@ -1,0 +1,23 @@
+services:
+  ai-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./ai_service:/app/ai_service
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./musetalk_models:/app/musetalk_models # If models are outside ai_service
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    shm_size: '2gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

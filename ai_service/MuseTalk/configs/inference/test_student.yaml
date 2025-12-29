@@ -1,0 +1,4 @@
+task_0:
+    video_path: "dataset/HDTF/video_root_25fps/test_clip_5s.mp4"
+    audio_path: "dataset/HDTF/video_audio_clip_root/test_audio_5s.wav" 
+    bbox_shift: 0

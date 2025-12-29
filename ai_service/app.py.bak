@@ -1,0 +1,418 @@
+
+import sys
+import torch
+from pathlib import Path
+import os
+import shutil
+import subprocess
+import glob
+import cv2
+import pickle
+from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import numpy as np
+import uuid
+import imageio_ffmpeg
+
+# Add MuseTalk to path
+sys.path.append(str(Path(__file__).parent / "MuseTalk"))
+
+# MuseTalk imports
+from musetalk.utils.utils import get_file_type, get_video_fps, datagen, load_all_model
+from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs, coord_placeholder
+from musetalk.utils.blending import get_image
+from musetalk.utils.face_parsing import FaceParsing
+from musetalk.utils.audio_processor import AudioProcessor
+from omegaconf import OmegaConf
+from transformers import WhisperModel
+from diffusers import AutoencoderKL, UNet2DConditionModel
+
+# Configuration
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
+
+# Model Paths (Relative to ai_service/MuseTalk)
+MUSE_DIR = Path(__file__).parent / "MuseTalk"
+UNET_CONFIG = MUSE_DIR / "models/musetalk/musetalk.json"
+UNET_MODEL_PATH = MUSE_DIR / "models/musetalkV15/unet.pth"
+VAE_TYPE = "sd-vae" # or "gan"
+WHISPER_DIR = MUSE_DIR / "models/whisper" # Should have downloaded here
+
+# Global models
+vae = None
+unet = None
+pe = None
+whisper = None
+audio_processor = None
+face_parser = None
+
+def load_models():
+    global vae, unet, pe, whisper, audio_processor, face_parser
+    
+    if vae is not None:
+        return
+
+    print("Loading MuseTalk models...")
+    
+    # Load VAE, UNet, PE
+    # load_all_model expects strings for paths
+    vae, unet, pe = load_all_model(
+        unet_model_path=str(UNET_MODEL_PATH),
+        vae_type=VAE_TYPE,
+        unet_config=str(UNET_CONFIG),
+        device=device,
+        vae_model_path=str(MUSE_DIR / "models" / VAE_TYPE)
+    )
+
+    # Move models to device
+    weight_dtype = torch.float16
+    pe = pe.to(device, dtype=weight_dtype)
+    vae.vae = vae.vae.to(device)
+    unet.model = unet.model.to(device, dtype=weight_dtype)
+    
+    print(f"[DEBUG] PE dtype: {pe.pe.dtype if hasattr(pe, 'pe') else 'unknown'}")
+    print(f"[DEBUG] UNet dtype: {unet.model.dtype}")
+
+    # Compile UNet for Blackwell Optimization
+    # Warning: First run will be slower due to compilation
+    print("Compiling UNet model with torch.compile...")
+    try:
+        unet.model = torch.compile(unet.model, mode="reduce-overhead")
+    except Exception as e:
+        print(f"Warning: torch.compile failed: {e}")
+
+    # Load Whisper
+    print("Loading Whisper...")
+    audio_processor = AudioProcessor(feature_extractor_path=str(WHISPER_DIR))
+    # WhisperModel from transformers or musetalk util? 
+    # The inference script uses transformers.WhisperModel
+    # But wait, AudioProcessor uses feature_extractor. 
+    # Let's check inference script again.
+    # whisper = WhisperModel.from_pretrained(args.whisper_dir)
+    whisper = WhisperModel.from_pretrained(str(WHISPER_DIR))
+    whisper = whisper.to(device=device, dtype=weight_dtype).eval()
+    whisper.requires_grad_(False)
+    print(f"[DEBUG] Whisper dtype: {whisper.dtype}")
+
+    # Load Face Parser
+    print("Loading Face Parser...")
+    face_parser = FaceParsing() # Default v1
+    # For v15: face_parser = FaceParsing(left_cheek_width=90, right_cheek_width=90)
+    # The inference script defaults to v15 params but calls FaceParsing with args
+    # default version is v15
+    face_parser = FaceParsing(left_cheek_width=90, right_cheek_width=90)
+    
+    print("Models loaded successfully.")
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+from fastapi.staticfiles import StaticFiles
+app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
+
+class TalkRequest(BaseModel):
+    text: str
+    sessionId: str
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        # Create symlink for models to satisfy FaceParsing hardcoded path
+        if not os.path.exists("models") and (MUSE_DIR / "models").exists():
+            try:
+                os.symlink(MUSE_DIR / "models", "models")
+                print(f"Created symlink ./models -> {MUSE_DIR}/models")
+            except Exception as e:
+                print(f"Failed to create models symlink: {e}")
+
+        load_models()
+    except Exception as e:
+        print(f"Failed to load models at startup: {e}")
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "ok", 
+        "gpu_available": torch.cuda.is_available(),
+        "models_loaded": vae is not None
+    }
+
+@app.post("/generate_avatar")
+async def generate_avatar(
+    audio: UploadFile = File(None),
+    text: str = Form(None),
+    image: UploadFile = File(None),
+    sessionId: str = Form(...)
+):
+    if not audio and not text:
+        raise HTTPException(status_code=400, detail="Either audio or text is required")
+    
+    # Generate unique ID for this job
+    job_id = f"{sessionId}_{uuid.uuid4().hex[:8]}"
+    
+    # Save input files
+    # TODO: In a real app, we should reuse the avatar image if available for session
+    # For now, we expect image to be sent or allow fallback?
+    # The node app sends "image" in FormData.
+    
+    image_path = None
+    if image:
+        image_path = UPLOAD_DIR / f"{job_id}_input.png"
+        with open(image_path, "wb") as f:
+            shutil.copyfileobj(image.file, f)
+    else:
+        # Check if we have a cached image for this session?
+        # For simplicity, Node app should send image every time or we store it here.
+        # Let's assume mandatory for now or handle empty.
+        pass
+
+    if not image_path or not image_path.exists():
+         raise HTTPException(status_code=400, detail="Avatar image is required")
+
+    audio_path = UPLOAD_DIR / f"{job_id}_input.wav"
+    
+    if audio:
+        with open(audio_path, "wb") as f:
+            shutil.copyfileobj(audio.file, f)
+    elif text:
+        # TTS generation
+        # Use gTTS or similar simple one, or call back to Node?
+        # Ideally, Node should handle TTS and send audio.
+        # But our contract allows text.
+        # Let's use edge-tts or gTTS. 
+        # For now, placeholder or error if no TTS lib.
+        # Installing 'edge-tts' or 'gTTS' in requirements would be good.
+        # Let's assume audio is provided for high quality, or fail.
+        # Actually, Node routes.ts sends audio if it can?
+        # Wait, Node routes.ts proxy sends what it gets.
+        # If user sends text to Node, Node forwards text. 
+        # We need TTS here.
+        pass
+        
+    if not audio_path.exists():
+         raise HTTPException(status_code=400, detail="Audio generation not implemented yet, please provide audio file")
+
+    # Run Inference
+    try:
+        output_video = run_inference(str(image_path), str(audio_path), job_id)
+        return {"status": "success", "video_url": f"/outputs/{output_video.name}"}
+    except Exception as e:
+        print(f"Inference error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+import time
+
+class Timer:
+    def __init__(self, name):
+        self.name = name
+        self.start = 0
+        
+    def __enter__(self):
+        self.start = time.time()
+        print(f"[LATENCY] Start {self.name}...")
+        return self
+        
+    def __exit__(self, exc_type, exc_value, traceback):
+        end = time.time()
+        duration = (end - self.start) * 1000
+        print(f"[LATENCY] End {self.name}: {duration:.2f}ms")
+
+
+# In-memory cache for landmarks: {session_id: (coord_list, frame_list)}
+# Simple dictionary for now, could be LRU in production
+LANDMARKS_CACHE = {}
+
+# Import optimized blending functions
+from musetalk.utils.blending import get_image_prepare_material, get_image_blending
+
+def run_inference(image_path, audio_path, job_id):
+    # This function adapts the logic from MuseTalk/scripts/inference.py
+    
+    # Extract session_id from job_id (format: sessionId_uuid)
+    # Be robust if job_id format changes
+    try:
+        session_id = job_id.split('_')[0]
+    except:
+        session_id = job_id
+    
+    weight_dtype = torch.float16
+
+    with Timer("Total Inference"):
+        # Prepare request
+        fps = 25
+        # batch_size = 48 # Reduced from 96 to avoid OOM (120GB VRAM limit)
+        # batch_size = 48 # Testing Deep TE with safe batch size
+        # batch_size = 96 # Attempting 96 again with 192x192 resolution
+        # batch_size = 96 # Attempting 96 again with 192x192 resolution
+        # batch_size = 72 # Reduced from 80 to ensure stability.
+        batch_size = 48 # Backchecking 192p compatibility.
+        
+        # Extract audio features
+        # audio_processor.get_audio_feature returns feature, length
+        with Timer("Whisper Feature Extraction"):
+            whisper_input_features, librosa_length = audio_processor.get_audio_feature(audio_path)
+        
+        with Timer("Whisper Chunking"):
+            whisper_chunks = audio_processor.get_whisper_chunk(
+                whisper_input_features, 
+                device, 
+                weight_dtype, # Use explicit dtype
+                whisper, 
+                librosa_length,
+                fps=fps
+            )
+        
+        # Process image (single image input case)
+        # MuseTalk supports video or image. We assume image.
+        input_img_list = [image_path]
+        
+        # Get landmarks via face_alignment (or cache if same session_id)
+        global LANDMARKS_CACHE
+        
+        coord_list = None
+        frame_list = None
+        
+        if session_id in LANDMARKS_CACHE:
+             print(f"[CACHE] Hit for session {session_id}")
+             coord_list, frame_list = LANDMARKS_CACHE[session_id]
+        else:
+             print(f"[CACHE] Miss for session {session_id}, running detection")
+             with Timer("Face Detection"):
+                bbox_shift = 0 # v15 default
+                coord_list, frame_list = get_landmark_and_bbox(input_img_list, bbox_shift)
+                # Store in cache
+                LANDMARKS_CACHE[session_id] = (coord_list, frame_list)
+        
+        # Duplicate for video length
+        video_num = len(whisper_chunks)
+        
+        # Prepare latents
+        # Since it's a single image, we crop and encode once?
+        # But get_landmark_and_bbox returns list matching input_img_list.
+        # So we have 1 frame, 1 bbox.
+        
+        bbox = coord_list[0]
+        if bbox == coord_placeholder:
+            raise HTTPException(status_code=400, detail="No face detected in the provided avatar image.")
+        frame = frame_list[0]
+        x1, y1, x2, y2 = bbox
+        
+        # v15 adjustment
+        y2 = y2 + 10 # extra_margin default
+        y2 = min(y2, frame.shape[0])
+        
+        with Timer("VAE Encoding"):
+            crop_frame = frame[y1:y2, x1:x2]
+            crop_frame = cv2.resize(crop_frame, (256,256), interpolation=cv2.INTER_LANCZOS4)
+            # crop_frame = cv2.resize(crop_frame, (192,192), interpolation=cv2.INTER_LANCZOS4) # Resolution Reduction for speed
+            latents = vae.get_latents_for_unet(crop_frame)
+            input_latent_list = [latents]
+        
+        # Cycle to match audio length
+        gen = datagen(
+            whisper_chunks=whisper_chunks,
+            vae_encode_latents=input_latent_list,
+            batch_size=batch_size,
+            delay_frame=0,
+            device=device
+        )
+        
+        res_frame_list = []
+        
+        # Inference Loop
+        with Timer("UNet Inference Loop"):
+            for i, (whisper_batch, latent_batch) in enumerate(gen):
+                audio_feature_batch = pe(whisper_batch)
+                
+                latent_batch = latent_batch.to(dtype=weight_dtype)
+                
+                timesteps = torch.tensor([0], device=device)
+                
+                pred_latents = unet.model(latent_batch, timesteps, encoder_hidden_states=audio_feature_batch).sample
+                
+                recon = vae.decode_latents(pred_latents)
+                
+                # Collect frames
+                for res_frame in recon:
+                    res_frame_list.append(res_frame)
+
+
+        # Zero-Copy Video Encoding Pipeline
+
+
+        # Zero-Copy Video Encoding Pipeline
+        output_path = OUTPUT_DIR / f"{job_id}.mp4"
+        
+        # Setup FFmpeg for stdin piping
+        # Use system ffmpeg if available (likely has nvenc), else fallback
+        ffmpeg_exe = "ffmpeg" # Assume system ffmpeg has nvenc based on check
+        
+        # If imageio_ffmpeg is needed: imageio_ffmpeg.get_ffmpeg_exe()
+        
+        height, width, _ = frame.shape
+        
+        cmd = [
+            ffmpeg_exe, "-y", "-v", "error",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-s", f"{width}x{height}",
+            "-pix_fmt", "bgr24",
+            "-r", str(fps),
+            "-i", "-", # Stdin input
+            "-i", str(audio_path),
+            "-vcodec", "libx264", # Fallback to CPU, but fast
+            "-preset", "ultrafast", # Fastest CPU preset
+            "-pix_fmt", "yuv420p",
+            # "-shortest",
+            str(output_path)
+        ]
+
+        print(f"[FFMPEG] Streaming to: {output_path}")
+        
+        video_process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        
+        with Timer("Face Blending (GPU-Piped)"):
+            # Optimization: Pre-compute the mask ONCE
+            mask_array, crop_box = get_image_prepare_material(frame, [x1, y1, x2, y2], mode='jaw', fp=face_parser)
+            
+            for i, res_frame in enumerate(res_frame_list):
+                # Resize to crop size
+                try:
+                    res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+                except:
+                    continue
+                
+                # Blending
+                combine_frame = get_image_blending(frame, res_frame, [x1, y1, x2, y2], mask_array, crop_box)
+                
+                # Write directly to FFmpeg pipe (Zero Copy I/O)
+                try:
+                    video_process.stdin.write(combine_frame.tobytes())
+                except Exception as e:
+                    print(f"FFmpeg Pipe Write Error: {e}")
+                    break
+        
+        # Close pipe and wait
+        video_process.stdin.close()
+        video_process.wait()
+        
+        if video_process.returncode != 0:
+             print(f"FFmpeg failed with code {video_process.returncode}")
+             # Fallback logic? for now just log.
+        
+        return output_path

@@ -1,0 +1,25 @@
+fastapi
+uvicorn
+python-multipart
+# torch (installed separately with CUDA)
+diffusers
+transformers
+accelerate
+opencv-python-headless
+scipy
+soundfile
+librosa
+moviepy
+huggingface_hub[cli]
+gdown
+# MuseTalk dependencies
+omegaconf
+face-alignment
+# mm packages installed via mim
+# omegaconf - installed above
+tifffile
+networkx
+tqdm
+ffmpeg-python
+einops
+numpy<2.0

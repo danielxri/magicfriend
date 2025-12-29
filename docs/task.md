@@ -1,0 +1,84 @@
+# Optimization Tasks
+
+- [x] **Analysis & Research**
+    - [x] Analyze `blending.py`
+    - [x] NVENC (Failed)
+    - [x] Frame Skipping (Failed)
+
+- [x] **Phase 3: Precision Optimization (Failed)**
+    - [x] Int8/BF16/FP8-Autocast Failed.
+    - [x] Deep TE Failed.
+
+- [x] **Phase 4: Workload Reduction (Failed)**
+    - [x] **Resolution 192x192**: Crash/Incompatible.
+    - [x] **Batch Scaling**: OOM / Crash.
+
+- [x] **Final Status**
+    - [x] **Reverting to Teacher Model** (Streaming Latency + Teacher Quality).
+        - [x] Switch `app.py` to Teacher UNet.
+        - [x] Verify functionality (Cold Start Verified).
+        - [x] Fix Dtype Mismatch (Half vs Float).
+        - [x] Fix Dtype Mismatch (Half vs Float).
+        - [x] Fix Audio Dtype (Float vs Half).
+        - [x] **FPS Optimization**: Batch 48 + Padding/Slicing Logic.
+        - [x] Verify End-to-End Playback.
+
+- [x] **Phase 5: Distillation (Student Model)**
+    - [x] Select Student: `nota-ai/bk-sdm-tiny`
+    - [x] Validate Pipeline Code (using dummy data)
+    - [x] **Prepare Real HDTF Data**
+        - [x] Download `videos.zip`
+        - [/] **Full Preprocessing (Active)**
+            - [x] Convert/Segment/Audio (Completed)
+            - [/] Landmark Extraction (Active: PID 532 | Running)
+        - [x] **Partial Training (Active)**
+            - [x] Generate `train_partial.txt` (144 samples)
+            - [/] Run Partial Distillation Training (Active: PID 07e685e1 | Overnight)
+    - [/] **Verification**
+        - [x] Create Testing Infrastructure (`inference_student.py`)
+        - [x] Generate Sample Video (Generated `test_clip_5s_..._STUDENT.mp4`)
+    - [/] **Verification**
+        - [x] Create Testing Infrastructure (`inference_student.py`)
+        - [x] Generate Sample Video (Generated `test_clip_5s_..._STUDENT.mp4`)
+        - [x] FPS Analyis (Achieved 18.6 FPS)
+    - [x] **Implementation: Streaming Pipeline**
+        - [x] Design Streaming Architecture (Inference -> Blend -> Stream)
+        - [x] Refactor `app.py` for per-batch streaming
+        - [x] Deploy and Verify Time-to-First-Frame (~0.34s verified)
+    - [x] **Full Training (Turbo Mode)**
+        - [x] Restarting with Batch Size 48 and Resume Logic
+        - [x] Run Distillation (Completed | Batch 48 | ~93k Equiv Steps | Loss ~0.027)
+        - [x] Export Student Checkpoint (Script `deploy_student.py` executed)
+    
+    - [x] **Debugging: Video Playback**
+        - [x] Diagnose "Pulsing Icon" (Deadlock in Pipe)
+        - [x] Implement Threaded Reader for `app.py`
+        - [x] Diagnose "Frontend 404" (Missing Proxy Route)
+        - [x] Implement Proxy Route in Node Server
+        - [x] **Diagnose "Multiple Messages" (Ignored Input)**
+            - [x] Identify `gpt-5.2` typo
+            - [x] Fix Frontend Error Handling (Unlock UI)
+        - [x] **Diagnose "Audio Loop" (Buffering)**
+            - [x] Identify Startup/Resume loop behavior
+            - [x] Implement FPS 21 Safety Buffer
+            - [x] Implement FFmpeg GOP (`-g`) for Instant Resume
+        - [x] **Debugging: Face Generator Style**
+            - [x] Locate Prompt Logic (`server/routes.ts`)
+            - [x] Update to "Pixar Baby" Aesthetic + 400px Mask
+            - [x] Fix "No Lip Sync" Crash (Blending ROI Error)
+        - [x] **Debugging: Prompt Refinement**
+            - [x] "Photorealistic Pixar" iteration
+            - [x] "Full Body" iteration (Rejected: Distortion)
+            - [x] "Balanced" iteration (Photoreal + Pixar Eyes)
+            - [x] "Balanced" iteration (Photoreal + Pixar Eyes)
+            - [x] "Mouth Prominence" iteration (Fail: Visual Distortion)
+            - [x] "Available" (Active)
+        - [x] **UI Debugging**
+            - [x] Resize Avatar to 2x (512px)
+        - [x] **Performance Optimization (Turbo)**
+            - [x] VAE FP16
+            - [x] XFormers Attention
+            - [x] Numpy Blending
+        - [x] **Feature: Object-Aware Personality**
+            - [x] Upgrade /api/character-card to GPT-5.2 Vision.
+        - [x] Verify End-to-End Streaming Fix (Audio + Video + Sync) - **SUCCESS**
